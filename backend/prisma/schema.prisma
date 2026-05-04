@@ -1,0 +1,287 @@
+// Docker (node:alpine): musl + OpenSSL 3 — explicit binary target avoids Prisma engine / libssl issues.
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================================
+// ENUMS
+// =====================================================================
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+enum RoomType {
+  FAMILY
+  DM
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  VOICE
+}
+
+enum MediaType {
+  IMAGE
+  VIDEO
+  VOICE
+}
+
+// =====================================================================
+// USERS & AUTH
+// =====================================================================
+
+model User {
+  id              String   @id @default(uuid())
+  email           String   @unique
+  name            String
+  passwordHash    String?
+  googleId        String?  @unique
+  profilePicture  String?
+  role            Role     @default(MEMBER)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  lastSeenAt      DateTime?
+
+  // Relations
+  invitationsSent  Invitation[]      @relation("InvitedBy")
+  roomMemberships  RoomMember[]
+  messages         Message[]         @relation("MessageAuthor")
+  reactions        Reaction[]
+  messageReads     MessageRead[]
+  mediaAssets      MediaAsset[]      @relation("MediaOwner")
+  albums           Album[]           @relation("AlbumOwner")
+  calendarEvents   CalendarEvent[]   @relation("EventOwner")
+  callsStarted     CallSession[]     @relation("CallStarter")
+  pushSubscriptions PushSubscription[]
+  refreshTokens    RefreshToken[]
+}
+
+model RefreshToken {
+  id          String   @id @default(uuid())
+  tokenHash   String   @unique
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime @default(now())
+  userAgent   String?
+
+  @@index([userId])
+}
+
+model Invitation {
+  id           String    @id @default(uuid())
+  token        String    @unique
+  email        String
+  invitedById  String
+  invitedBy    User      @relation("InvitedBy", fields: [invitedById], references: [id])
+  usedAt       DateTime?
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+
+  @@index([email])
+}
+
+// =====================================================================
+// CHAT
+// =====================================================================
+
+model ChatRoom {
+  id        String       @id @default(uuid())
+  name      String
+  type      RoomType     @default(FAMILY)
+  createdAt DateTime     @default(now())
+
+  members   RoomMember[]
+  messages  Message[]
+  calls     CallSession[]
+}
+
+model RoomMember {
+  roomId      String
+  userId      String
+  joinedAt    DateTime @default(now())
+  lastReadAt  DateTime?
+
+  room        ChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([roomId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id            String        @id @default(uuid())
+  roomId        String
+  authorId      String
+  type          MessageType   @default(TEXT)
+  content       String?
+  mediaAssetId  String?
+  replyToId     String?
+  createdAt     DateTime      @default(now())
+  editedAt      DateTime?
+  deletedAt     DateTime?
+
+  room          ChatRoom      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  author        User          @relation("MessageAuthor", fields: [authorId], references: [id])
+  mediaAsset    MediaAsset?   @relation(fields: [mediaAssetId], references: [id])
+  replyTo       Message?      @relation("MessageReply", fields: [replyToId], references: [id])
+  replies       Message[]     @relation("MessageReply")
+
+  reactions     Reaction[]
+  reads         MessageRead[]
+
+  @@index([roomId, createdAt])
+  @@index([authorId])
+}
+
+model Reaction {
+  id         String   @id @default(uuid())
+  messageId  String
+  userId     String
+  emoji      String
+  createdAt  DateTime @default(now())
+
+  message    Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+}
+
+model MessageRead {
+  messageId  String
+  userId     String
+  readAt     DateTime @default(now())
+
+  message    Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([messageId, userId])
+  @@index([userId])
+}
+
+// =====================================================================
+// MEDIA
+// =====================================================================
+
+model MediaAsset {
+  id                  String       @id @default(uuid())
+  ownerId             String
+  cloudinaryPublicId  String       @unique
+  type                MediaType
+  url                 String
+  thumbnailUrl        String?
+  width               Int?
+  height              Int?
+  duration            Float?
+  format              String?
+  bytes               Int?
+  waveform            Json?
+  createdAt           DateTime     @default(now())
+
+  owner       User         @relation("MediaOwner", fields: [ownerId], references: [id])
+  messages    Message[]
+  albumLinks  AlbumAsset[]
+  albumCovers Album[]      @relation("AlbumCover")
+
+  @@index([ownerId, createdAt])
+  @@index([type])
+}
+
+model Album {
+  id            String       @id @default(uuid())
+  ownerId       String
+  title         String
+  description   String?
+  coverAssetId  String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  owner         User         @relation("AlbumOwner", fields: [ownerId], references: [id])
+  coverAsset    MediaAsset?  @relation("AlbumCover", fields: [coverAssetId], references: [id])
+  assets        AlbumAsset[]
+
+  @@index([ownerId])
+}
+
+model AlbumAsset {
+  albumId   String
+  assetId   String
+  addedAt   DateTime @default(now())
+
+  album     Album      @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  asset     MediaAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@id([albumId, assetId])
+  @@index([assetId])
+}
+
+// =====================================================================
+// CALENDAR
+// =====================================================================
+
+model CalendarEvent {
+  id            String   @id @default(uuid())
+  ownerId       String
+  title         String
+  description   String?
+  location      String?
+  startsAt      DateTime
+  endsAt        DateTime
+  allDay        Boolean  @default(false)
+  isFamilyWide  Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  owner         User     @relation("EventOwner", fields: [ownerId], references: [id])
+
+  @@index([startsAt])
+  @@index([ownerId])
+}
+
+// =====================================================================
+// CALLS
+// =====================================================================
+
+model CallSession {
+  id                String   @id @default(uuid())
+  roomId            String
+  livekitRoomName   String   @unique
+  startedById       String
+  startedAt         DateTime @default(now())
+  endedAt           DateTime?
+  isVideo           Boolean  @default(true)
+
+  room              ChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  startedBy         User     @relation("CallStarter", fields: [startedById], references: [id])
+
+  @@index([roomId])
+}
+
+// =====================================================================
+// PUSH NOTIFICATIONS
+// =====================================================================
+
+model PushSubscription {
+  id                String   @id @default(uuid())
+  userId            String
+  oneSignalPlayerId String   @unique
+  deviceInfo        String?
+  createdAt         DateTime @default(now())
+  lastSeenAt        DateTime @default(now())
+
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
